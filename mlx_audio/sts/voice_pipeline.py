@@ -14,7 +14,8 @@ from mlx_audio.tts.audio_player import AudioPlayer
 from mlx_audio.tts.utils import load_model as load_tts
 
 logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger(__name__)
 
@@ -52,10 +53,17 @@ class VoicePipeline:
 
         self.mlx_lock = asyncio.Lock()
 
+        self.conversation_history = [
+            {
+                "role": "system",
+                "content": "You are a helpful voice assistant. You always respond with short sentences and never use punctuation like parentheses or colons that wouldn't appear in conversational speech, but commas and points are alright. Do not use emojis or other non-verbal characters.",
+            },
+        ]
+
     async def init_models(self):
         logger.info(f"Loading text generation model: {self.llm_model}")
         self.llm, self.tokenizer = await asyncio.to_thread(
-            lambda: load_llm(self.llm_model)
+            lambda: load_llm(self.llm_model),
         )
 
         logger.info(f"Loading text-to-speech model: {self.tts_model}")
@@ -121,7 +129,7 @@ class VoicePipeline:
         frames = []
         silent_frames = 0
         frames_until_silence = int(
-            self.silence_duration * 1000 / self.frame_duration_ms
+            self.silence_duration * 1000 / self.frame_duration_ms,
         )
         speaking_detected = False
 
@@ -134,14 +142,8 @@ class VoicePipeline:
                     speaking_detected = True
                     silent_frames = 0
                     frames.append(frame)
-
-                    # Cancel the current TTS task
-                    if hasattr(self, "current_tts_task") and self.current_tts_task:
-                        # Signal the generator loop to stop
-                        self.current_tts_cancel.set()
-
-                    # Clear the output audio queue
-                    self.loop.call_soon_threadsafe(self.player.flush)
+                    # REMOVE: TTS cancel logic here
+                    # REMOVE: self.loop.call_soon_threadsafe(self.player.flush)
                 elif speaking_detected:
                     silent_frames += 1
                     frames.append(frame)
@@ -149,7 +151,6 @@ class VoicePipeline:
                     if silent_frames > frames_until_silence:
                         # Process the voice input
                         if frames:
-
                             logger.info("Processing voice input...")
                             await self._process_audio(frames)
 
@@ -186,6 +187,11 @@ class VoicePipeline:
 
         if text:
             logger.info(f"Transcribed: {text}")
+            # NEW: Cancel TTS if "hey julia" is detected
+            if "hey julia" in text.lower():
+                if hasattr(self, "current_tts_task") and self.current_tts_task:
+                    self.current_tts_cancel.set()
+                    self.loop.call_soon_threadsafe(self.player.flush)
             await self.transcription_queue.put(text)
 
     # response generation
@@ -199,34 +205,42 @@ class VoicePipeline:
     async def _generate_response(self, text):
         def _get_llm_response(llm, tokenizer, messages, *, verbose=False):
             prompt = tokenizer.apply_chat_template(
-                messages, tokenize=False, add_generation_prompt=True
+                messages,
+                tokenize=False,
+                add_generation_prompt=True,
             )
             return generate_text(llm, tokenizer, prompt, verbose=verbose).strip()
 
         try:
+            if "hey julia" not in text.lower():
+                logger.info("Ignoring input: %s", text)
+                return
             logger.info("Generating response...")
 
-            messages = [
-                {
-                    "role": "system",
-                    "content": "You are a helpful voice assistant. You always respond with short sentences and never use punctuation like parentheses or colons that wouldn't appear in conversational speech.",
-                },
+            self.conversation_history.append(
                 {"role": "user", "content": text},
-            ]
+            )
             async with self.mlx_lock:
                 response_text = await asyncio.to_thread(
-                    _get_llm_response, self.llm, self.tokenizer, messages, verbose=False
+                    _get_llm_response,
+                    self.llm,
+                    self.tokenizer,
+                    messages=self.conversation_history,
+                    verbose=False,
                 )
 
-            logger.info(f"Generated response: {response_text}")
+            logger.info("Generated response: %s", response_text)
 
             if response_text:
                 self.current_tts_cancel = asyncio.Event()
-                self.current_tts_task = asyncio.create_task(
-                    self._speak_response(response_text, self.current_tts_cancel)
+                self.conversation_history.append(
+                    {"role": "assistant", "content": response_text},
                 )
-        except Exception as e:
-            logger.error(f"Generation error: {e}")
+                self.current_tts_task = asyncio.create_task(
+                    self._speak_response(response_text, self.current_tts_cancel),
+                )
+        except Exception:
+            logger.exception("Generation error")
 
     # speech generation
 
@@ -288,23 +302,35 @@ async def main():
         help="STT model",
     )
     parser.add_argument(
-        "--tts_model", type=str, default="mlx-community/csm-1b-fp16", help="TTS model"
+        "--tts_model",
+        type=str,
+        default="mlx-community/Kokoro-82M-bf16",
+        help="TTS model",
     )
     parser.add_argument(
         "--llm_model",
         type=str,
-        default="mlx-community/Qwen2.5-0.5B-Instruct-4bit",
+        default="mlx-community/Llama-3.2-3B-Instruct-4bit",
         help="LLM model",
     )
     parser.add_argument("--vad_mode", type=int, default=3, help="VAD mode")
     parser.add_argument(
-        "--silence_duration", type=float, default=1.5, help="Silence duration"
+        "--silence_duration",
+        type=float,
+        default=1.5,
+        help="Silence duration",
     )
     parser.add_argument(
-        "--silence_threshold", type=float, default=0.03, help="Silence threshold"
+        "--silence_threshold",
+        type=float,
+        default=0.03,
+        help="Silence threshold",
     )
     parser.add_argument(
-        "--streaming_interval", type=int, default=3, help="Streaming interval"
+        "--streaming_interval",
+        type=int,
+        default=3,
+        help="Streaming interval",
     )
     args = parser.parse_args()
 
