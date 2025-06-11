@@ -8,8 +8,8 @@ from textwrap import dedent
 from typing import List, Optional, Tuple, Union
 
 import mlx.core as mx
-import mlx.nn as nn
 from huggingface_hub import snapshot_download
+from mlx import nn
 from mlx.utils import tree_flatten
 from mlx_lm.convert import mixed_quant_predicate_builder
 from mlx_lm.utils import dequantize_model, quantize_model, save_config, save_model
@@ -31,6 +31,7 @@ def get_model_path(path_or_hf_repo: str, revision: Optional[str] = None) -> Path
 
     Returns:
         Path: The path to the model.
+
     """
     model_path = Path(path_or_hf_repo)
 
@@ -49,7 +50,7 @@ def get_model_path(path_or_hf_repo: str, revision: Optional[str] = None) -> Path
                     "*.jsonl",
                     "*.yaml",
                 ],
-            )
+            ),
         )
 
     return model_path
@@ -62,6 +63,7 @@ def get_available_models():
 
     Returns:
         List[str]: A list of available model type names
+
     """
     models_dir = Path(__file__).parent / "models"
     available_models = []
@@ -94,6 +96,7 @@ def get_model_and_args(model_type: str, model_name: List[str]):
 
     Raises:
         ValueError: If the model type is not supported (module import fails).
+
     """
     # Stage 1: Check if the model type is in the remapping
     model_type = MODEL_REMAPPING.get(model_type, model_type)
@@ -115,14 +118,15 @@ def get_model_and_args(model_type: str, model_name: List[str]):
         arch = importlib.import_module(f"mlx_audio.tts.models.{model_type}")
     except ImportError:
         msg = f"Model type {model_type} not supported."
-        logging.error(msg)
+        logging.exception(msg)
         raise ValueError(msg)
 
     return arch, model_type
 
 
 def load_config(model_path: Union[str, Path], **kwargs) -> dict:
-    """Load model configuration from a path or Hugging Face repo.
+    """
+    Load model configuration from a path or Hugging Face repo.
 
     Args:
         model_path: Local path or Hugging Face repo ID to load config from
@@ -133,6 +137,7 @@ def load_config(model_path: Union[str, Path], **kwargs) -> dict:
 
     Raises:
         FileNotFoundError: If config.json is not found at the path
+
     """
     if isinstance(model_path, str):
         model_path = get_model_path(model_path)
@@ -148,7 +153,10 @@ def load_config(model_path: Union[str, Path], **kwargs) -> dict:
 
 
 def load_model(
-    model_path: Path, lazy: bool = False, strict: bool = True, **kwargs
+    model_path: Path,
+    lazy: bool = False,
+    strict: bool = True,
+    **kwargs,
 ) -> nn.Module:
     """
     Load and initialize the model from a given path.
@@ -165,6 +173,7 @@ def load_model(
     Raises:
         FileNotFoundError: If the weight files (.safetensors) are not found.
         ValueError: If the model class or args class are not found or cannot be instantiated.
+
     """
     model_name = None
     if isinstance(model_path, str):
@@ -219,7 +228,8 @@ python -m mlx_audio.tts.convert --hf-path <local_dir> --mlx-path <mlx_dir>
         weights.update(mx.load(wf))
 
     model_class, model_type = get_model_and_args(
-        model_type=model_type, model_name=model_name
+        model_type=model_type,
+        model_name=model_name,
     )
 
     # Get model config from model class if it exists, otherwise use the config
@@ -269,7 +279,9 @@ python -m mlx_audio.tts.convert --hf-path <local_dir> --mlx-path <mlx_dir>
 
 
 def fetch_from_hub(
-    model_path: Path, lazy: bool = False, **kwargs
+    model_path: Path,
+    lazy: bool = False,
+    **kwargs,
 ) -> Tuple[nn.Module, dict]:
     model = load_model(model_path, lazy, **kwargs)
     config = load_config(model_path, **kwargs)
@@ -284,6 +296,7 @@ def upload_to_hub(path: str, upload_repo: str, hf_path: str):
         path (str): Local path to the model.
         upload_repo (str): Name of the HF repo to upload to.
         hf_path (str): Path to the original Hugging Face model.
+
     """
     import os
 
@@ -307,7 +320,7 @@ def upload_to_hub(path: str, upload_repo: str, hf_path: str):
         ```bash
         python -m mlx_audio.tts.generate --model {upload_repo} --text "Describe this image."
         ```
-        """
+        """,
     )
     card.save(os.path.join(path, "README.md"))
 
@@ -339,7 +352,9 @@ def convert(
     print("[INFO] Loading")
     model_path = get_model_path(hf_path, revision=revision)
     model, config = fetch_from_hub(
-        model_path, lazy=True, trust_remote_code=trust_remote_code
+        model_path,
+        lazy=True,
+        trust_remote_code=trust_remote_code,
     )
 
     if isinstance(quant_predicate, str):
@@ -347,7 +362,9 @@ def convert(
 
     # Get model-specific quantization predicate if available
     model_quant_predicate = getattr(
-        model, "model_quant_predicate", lambda p, m, config: True
+        model,
+        "model_quant_predicate",
+        lambda p, m, config: True,
     )
 
     # Define base quantization requirements
@@ -384,7 +401,11 @@ def convert(
         print("[INFO] Quantizing")
         model.load_weights(list(weights.items()))
         weights, config = quantize_model(
-            model, config, q_group_size, q_bits, quant_predicate=quant_predicate
+            model,
+            config,
+            q_group_size,
+            q_bits,
+            quant_predicate=quant_predicate,
         )
 
     if dequantize:
