@@ -45,5 +45,9 @@ output/
 # uv
 .build
 claude.md
+.claude/
 .claude/site/
 .generated/legacy-docs-generated/
+
+# Generated audio files
+*.wav
