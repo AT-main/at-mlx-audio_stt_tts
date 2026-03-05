@@ -51,3 +51,7 @@ claude.md
 
 # Generated audio files
 *.wav
+
+# Node / UI
+node_modules/
+package-lock.json
