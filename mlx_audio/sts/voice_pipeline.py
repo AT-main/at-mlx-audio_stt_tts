@@ -28,6 +28,7 @@ class VoicePipelineConfig:
     input_sample_rate: int = 16_000
     output_sample_rate: Optional[int] = None
     input_channels: int = 1
+    input_device: Optional[Any] = None
     frame_duration_ms: int = 32
     latency_profile: str = "balanced"
 
@@ -901,12 +902,26 @@ class VoicePipeline:
         frame_size = int(
             self.config.input_sample_rate * (self.config.frame_duration_ms / 1000.0)
         )
+        try:
+            sd.rec(
+                int(self.config.input_sample_rate * 0.2),
+                samplerate=self.config.input_sample_rate,
+                channels=self.config.input_channels,
+                dtype="float32",
+                device=self.config.input_device,
+            )
+            sd.wait()
+        except Exception as exc:
+            logger.warning("Audio device warmup failed: %s", exc)
+
         stream = sd.InputStream(
             samplerate=self.config.input_sample_rate,
             blocksize=frame_size,
             channels=self.config.input_channels,
-            dtype="int16",
+            dtype="float32",
             callback=self._sd_callback,
+            device=self.config.input_device,
+            latency="low",
         )
         stream.start()
         self._log_event(
@@ -915,6 +930,7 @@ class VoicePipeline:
             frame_ms=self.config.frame_duration_ms,
             vad_start_threshold=self.config.vad_start_threshold,
             vad_stop_threshold=self.config.vad_stop_threshold,
+            input_device=self.config.input_device,
         )
         try:
             while True:
@@ -1285,17 +1301,26 @@ class VoicePipeline:
 
     async def _respond_to_transcript(self, transcript: str):
         wake_word = (self.config.wake_word or "").lower().strip()
+        print(f"\n🎙️  You: {transcript}", flush=True)
         if wake_word and wake_word not in transcript.lower():
             self._log_event(
                 "wake_word_missing", wake_word=wake_word, transcript=transcript
             )
+            print(f"     (ignored — say '{wake_word}' to address me)", flush=True)
             return
-        response_text = await asyncio.to_thread(
-            self.response_engine.generate, transcript, self._conversation
-        )
+        print("     ...thinking", flush=True)
+        try:
+            response_text = await asyncio.to_thread(
+                self.response_engine.generate, transcript, self._conversation
+            )
+        except Exception as exc:
+            print(f"     ⚠️  LLM error: {exc}", flush=True)
+            return
         response_text = response_text.strip()
         if not response_text:
+            print("     (empty response)", flush=True)
             return
+        print(f"🤖 Assistant: {response_text}\n", flush=True)
         self._current_response_text = response_text
         self._log_event("response_ready", text=response_text, chars=len(response_text))
         self._conversation.append({"role": "user", "content": transcript})
@@ -1437,6 +1462,11 @@ async def main():
         help="Wake word required in transcript to trigger a response (empty to disable)",
     )
     parser.add_argument(
+        "--input_device",
+        default=None,
+        help="sounddevice input device index or name substring",
+    )
+    parser.add_argument(
         "--vad_model",
         type=str,
         default="mlx-community/silero-vad",
@@ -1567,6 +1597,11 @@ async def main():
         response_model=args.llm_model,
         response_base_url=args.llm_base_url,
         wake_word=args.wake_word,
+        input_device=(
+            int(args.input_device)
+            if args.input_device is not None and args.input_device.isdigit()
+            else args.input_device
+        ),
         vad_model=args.vad_model,
         turn_model=args.turn_model,
         vad_start_threshold=args.vad_start_threshold,
