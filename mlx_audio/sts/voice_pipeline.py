@@ -7,11 +7,10 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any, Callable, Iterable, Optional
 
+import httpx
 import mlx.core as mx
 import numpy as np
 import sounddevice as sd
-from mlx_lm.generate import generate as generate_text
-from mlx_lm.utils import load as load_llm
 
 from mlx_audio.sts.audio_player import AudioPlayer
 from mlx_audio.tts.utils import load_model as load_tts
@@ -50,9 +49,11 @@ class VoicePipelineConfig:
     turn_threshold: float = 0.5
     turn_max_incomplete_silence_ms: int = 1600
 
-    response_model: str = "mlx-community/NVIDIA-Nemotron-3-Nano-30B-A3B-4bit"
+    response_model: str = "lfm2"
+    response_base_url: str = "http://localhost:11434"
+    wake_word: str = "hey assistant"
     system_prompt: str = (
-        "You are a helpful voice assistant. Respond in natural spoken sentences. Never use markdown, emoji, or lists."
+        "You are a helpful voice assistant. You always respond with short sentences and never use punctuation like parentheses or colons that wouldn't appear in conversational speech, but commas and points are alright. Do not use emojis or other non-verbal characters."
     )
 
     tts_model: str = "mlx-community/pocket-tts"
@@ -391,27 +392,43 @@ class VoxtralRealtimeTranscriber:
         return final_text
 
 
-class LocalLLMResponseEngine:
-    def __init__(self, model_name: str, *, system_prompt: str):
+class OllamaResponseEngine:
+    def __init__(
+        self,
+        model_name: str,
+        *,
+        system_prompt: str,
+        base_url: str = "http://localhost:11434",
+        timeout: float = 60.0,
+    ):
         self.model_name = model_name
         self.system_prompt = system_prompt
-        self.llm = None
-        self.tokenizer = None
+        self.base_url = base_url.rstrip("/")
+        self.timeout = timeout
 
     def load(self) -> None:
-        self.llm, self.tokenizer = load_llm(self.model_name)
+        pass
 
     def generate(self, transcript: str, context: Optional[list[dict]] = None) -> str:
-        if self.llm is None or self.tokenizer is None:
-            self.load()
         messages = [{"role": "system", "content": self.system_prompt}]
         if context:
             messages.extend(context)
         messages.append({"role": "user", "content": transcript})
-        prompt = self.tokenizer.apply_chat_template(
-            messages, tokenize=False, enable_thinking=False, add_generation_prompt=True
-        )
-        return generate_text(self.llm, self.tokenizer, prompt, verbose=False).strip()
+        with httpx.Client(timeout=self.timeout) as client:
+            response = client.post(
+                f"{self.base_url}/api/chat",
+                json={
+                    "model": self.model_name,
+                    "messages": messages,
+                    "stream": False,
+                },
+            )
+            response.raise_for_status()
+            message = response.json().get("message", {})
+        text = (message.get("content") or "").strip()
+        if not text:
+            text = (message.get("thinking") or "").strip()
+        return text
 
 
 class PocketTTSResponder:
@@ -806,10 +823,11 @@ class VoicePipeline:
             )
 
         if self.response_engine is None:
-            self.response_engine = LocalLLMResponseEngine(
-                self.config.response_model, system_prompt=self.config.system_prompt
+            self.response_engine = OllamaResponseEngine(
+                self.config.response_model,
+                system_prompt=self.config.system_prompt,
+                base_url=self.config.response_base_url,
             )
-            await self.mlx.run(self.response_engine.load)
 
         if self.tts_responder is None:
             tts = await self.mlx.run(lambda: load_tts(self.config.tts_model))
@@ -1266,8 +1284,14 @@ class VoicePipeline:
                 self.transcript_queue.task_done()
 
     async def _respond_to_transcript(self, transcript: str):
-        response_text = await self.mlx.run(
-            lambda: self.response_engine.generate(transcript, self._conversation)
+        wake_word = (self.config.wake_word or "").lower().strip()
+        if wake_word and wake_word not in transcript.lower():
+            self._log_event(
+                "wake_word_missing", wake_word=wake_word, transcript=transcript
+            )
+            return
+        response_text = await asyncio.to_thread(
+            self.response_engine.generate, transcript, self._conversation
         )
         response_text = response_text.strip()
         if not response_text:
@@ -1397,8 +1421,20 @@ async def main():
     parser.add_argument(
         "--llm_model",
         type=str,
-        default="mlx-community/NVIDIA-Nemotron-3-Nano-30B-A3B-4bit",
-        help="LLM model",
+        default="lfm2",
+        help="Ollama LLM model name",
+    )
+    parser.add_argument(
+        "--llm_base_url",
+        type=str,
+        default="http://localhost:11434",
+        help="Ollama base URL",
+    )
+    parser.add_argument(
+        "--wake_word",
+        type=str,
+        default="hey assistant",
+        help="Wake word required in transcript to trigger a response (empty to disable)",
     )
     parser.add_argument(
         "--vad_model",
@@ -1529,6 +1565,8 @@ async def main():
         tts_model=args.tts_model,
         tts_voice=args.voice,
         response_model=args.llm_model,
+        response_base_url=args.llm_base_url,
+        wake_word=args.wake_word,
         vad_model=args.vad_model,
         turn_model=args.turn_model,
         vad_start_threshold=args.vad_start_threshold,
